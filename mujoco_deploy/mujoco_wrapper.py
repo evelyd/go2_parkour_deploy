@@ -3,7 +3,6 @@ import numpy as np
 from mujoco_deploy.mujoco_sensors.mujoco_raycaster import MujocoRaycaster
 from mujoco_deploy.mujoco_sensors.mujoco_contact_sensor import MujocoContactSensor
 from mujoco_deploy.mujoco_sensors.mujoco_depth_camera import MujocoDepthCamera
-from isaaclab.utils.math  import euler_xyz_from_quat, wrap_to_pi
 from mujoco_deploy.mujoco_env import MujocoEnv
 from mujoco_deploy.mujoco_sensors.mujoco_joystick_controller import MujocoJoystick
 import copy, cv2, torchvision
@@ -12,6 +11,87 @@ import math
 import imageio
 import mujoco
 import inspect
+
+@th.jit.script
+def copysign(mag: float, other: th.Tensor) -> th.Tensor:
+    """Create a new floating-point tensor with the magnitude of input and the sign of other, element-wise.
+
+    Note:
+        The implementation follows from `torch.copysign`. The function allows a scalar magnitude.
+
+    Args:
+        mag: The magnitude scalar.
+        other: The tensor containing values whose signbits are applied to magnitude.
+
+    Returns:
+        The output tensor.
+    """
+    mag_torch = abs(mag) * th.ones_like(other)
+    return th.copysign(mag_torch, other)
+
+@th.jit.script
+def euler_xyz_from_quat(
+    quat: th.Tensor, wrap_to_2pi: bool = False
+) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+    """Convert rotations given as quaternions to Euler angles in radians.
+
+    Note:
+        The euler angles are assumed in XYZ extrinsic convention.
+
+    Args:
+        quat: The quaternion orientation in (w, x, y, z). Shape is (N, 4).
+        wrap_to_2pi (bool): Whether to wrap output Euler angles into [0, 2π). If
+            False, angles are returned in the default range (−π, π]. Defaults to
+            False.
+
+    Returns:
+        A tuple containing roll-pitch-yaw. Each element is a tensor of shape (N,).
+
+    Reference:
+        https://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles
+    """
+    q_w, q_x, q_y, q_z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    # roll (x-axis rotation)
+    sin_roll = 2.0 * (q_w * q_x + q_y * q_z)
+    cos_roll = 1 - 2 * (q_x * q_x + q_y * q_y)
+    roll = th.atan2(sin_roll, cos_roll)
+
+    # pitch (y-axis rotation)
+    sin_pitch = 2.0 * (q_w * q_y - q_z * q_x)
+    pitch = th.where(th.abs(sin_pitch) >= 1, copysign(th.pi / 2.0, sin_pitch), th.asin(sin_pitch))
+
+    # yaw (z-axis rotation)
+    sin_yaw = 2.0 * (q_w * q_z + q_x * q_y)
+    cos_yaw = 1 - 2 * (q_y * q_y + q_z * q_z)
+    yaw = th.atan2(sin_yaw, cos_yaw)
+
+    if wrap_to_2pi:
+        return roll % (2 * th.pi), pitch % (2 * th.pi), yaw % (2 * th.pi)
+    return roll, pitch, yaw
+
+@th.jit.script
+def wrap_to_pi(angles: th.Tensor) -> th.Tensor:
+    r"""Wraps input angles (in radians) to the range :math:`[-\pi, \pi]`.
+
+    This function wraps angles in radians to the range :math:`[-\pi, \pi]`, such that
+    :math:`\pi` maps to :math:`\pi`, and :math:`-\pi` maps to :math:`-\pi`. In general,
+    odd positive multiples of :math:`\pi` are mapped to :math:`\pi`, and odd negative
+    multiples of :math:`\pi` are mapped to :math:`-\pi`.
+
+    The function behaves similar to MATLAB's `wrapToPi <https://www.mathworks.com/help/map/ref/wraptopi.html>`_
+    function.
+
+    Args:
+        angles: Input angles of any shape.
+
+    Returns:
+        Angles in the range :math:`[-\pi, \pi]`.
+    """
+    # wrap to [0, 2*pi)
+    wrapped_angle = (angles + th.pi) % (2 * th.pi)
+    # map to [-pi, pi]
+    # we check for zero in wrapped angle to make it go to pi when input angle is odd multiple of pi
+    return th.where((wrapped_angle == 0) & (angles > 0), th.pi, wrapped_angle - th.pi)
 
 from tqdm import tqdm
 class MujocoWrapper():

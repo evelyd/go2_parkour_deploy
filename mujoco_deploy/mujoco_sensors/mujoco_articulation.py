@@ -1,12 +1,56 @@
 import mujoco
-import isaaclab.utils.math as math_utils
-import torch as th 
-from isaaclab.utils.buffers import TimestampedBuffer
+import torch as th
 from core.utils import get_entity_name, get_entity_id, ISAAC_JOINT_NAMES, mujoco_to_isaac, isaac_to_mujoco
-import numpy as np 
+import numpy as np
 from typing import Tuple
-import re 
+import re
 from scipy.spatial.transform import Rotation
+from dataclasses import dataclass
+
+@dataclass
+class TimestampedBuffer:
+    """A buffer class containing data and its timestamp.
+
+    This class is a simple data container that stores a tensor and its timestamp. The timestamp is used to
+    track the last update of the buffer. The timestamp is set to -1.0 by default, indicating that the buffer
+    has not been updated yet. The timestamp should be updated whenever the data in the buffer is updated. This
+    way the buffer can be used to check whether the data is outdated and needs to be refreshed.
+
+    The buffer is useful for creating lazy buffers that only update the data when it is outdated. This can be
+    useful when the data is expensive to compute or retrieve. For example usage, refer to the data classes in
+    the :mod:`isaaclab.assets` module.
+    """
+
+    data: th.Tensor = None  # type: ignore
+    """The data stored in the buffer. Default is None, indicating that the buffer is empty."""
+
+    timestamp: float = -1.0
+    """Timestamp at the last update of the buffer. Default is -1.0, indicating that the buffer has not been updated."""
+
+
+@th.jit.script
+def quat_apply_inverse(quat: th.Tensor, vec: th.Tensor) -> th.Tensor:
+    """Apply an inverse quaternion rotation to a vector.
+
+    Args:
+        quat: The quaternion in (w, x, y, z). Shape is (..., 4).
+        vec: The vector in (x, y, z). Shape is (..., 3).
+
+    Returns:
+        The rotated vector in (x, y, z). Shape is (..., 3).
+    """
+    # store shape
+    shape = vec.shape
+    # reshape to (N, 3) for multiplication
+    quat = quat.reshape(-1, 4)
+    vec = vec.reshape(-1, 3)
+    # extract components from quaternions
+    xyz = quat[:, 1:]
+    t = xyz.cross(vec, dim=-1) * 2
+    return (vec - quat[:, 0:1] * t + xyz.cross(t, dim=-1)).view(shape)
+
+import logging
+logger = logging.getLogger(__name__)
 
 class MujocoArticulation():
     """
@@ -14,7 +58,7 @@ class MujocoArticulation():
     """
     def __init__(self, env_cfg ,model: mujoco.MjModel, data:mujoco.MjData ):
         self._model = model
-        self._data = data 
+        self._data = data
         self._env_cfg = env_cfg
         actuator_consistency = self._check_actuator_consistency()
         assert actuator_consistency, "Only support that all the actuator use the same control type."
@@ -63,7 +107,7 @@ class MujocoArticulation():
     @property
     def saturation_effort(self):
         return self._saturation_effort
-    
+
     @property
     def velocity_limit(self):
         return self._velocity_limit
@@ -118,12 +162,12 @@ class MujocoArticulation():
             else:
                 body_ids[name] = id_
         return body_ids
-    
+
     @property
     def joint_names(self) -> list[str]:
         offset = 0
         if self._has_free_joint:
-            offset = 1  
+            offset = 1
         return [get_entity_name(self._model, "joint", i) for i in range(offset, self._model.njnt)]
 
     def get_joint_ids(self, joint_names: list[str] | None = None, free_joint_offset: int = 1) -> dict[str, int]:
@@ -136,7 +180,7 @@ class MujocoArticulation():
             else:
                 joint_ids[name] = id_
         return joint_ids
-    
+
     def _check_actuator_consistency(self):
         """Check whether all the actuators share the same control mode."""
         actuator_type_system = None
@@ -158,26 +202,26 @@ class MujocoArticulation():
         self._joint_pos = TimestampedBuffer()
         self._joint_vel = TimestampedBuffer()
 
-        
+
     @property
     def root_state_w(self):
         bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, 'base_link')
         if bid < 0:
             raise ValueError(f"Body 'base_link' not found")
-        pos_w   = th.from_numpy(self._data.xpos[bid].copy()).to(device=self._device)        
-        quat_w  = th.from_numpy(self._data.xquat[bid].copy()).to(device=self._device)         
+        pos_w   = th.from_numpy(self._data.xpos[bid].copy()).to(device=self._device)
+        quat_w  = th.from_numpy(self._data.xquat[bid].copy()).to(device=self._device)
 
-        cvel_local = self._data.cvel[bid].copy()                                 
-        R = self._data.xmat[bid].reshape(3, 3).copy()                             
-        ang_w = R @ cvel_local[0:3]                                    
-        lin_w = R @ cvel_local[3:6]                                 
+        cvel_local = self._data.cvel[bid].copy()
+        R = self._data.xmat[bid].reshape(3, 3).copy()
+        ang_w = R @ cvel_local[0:3]
+        lin_w = R @ cvel_local[3:6]
 
         ang_w = th.from_numpy(ang_w).to(device=self._device)
         lin_w = th.from_numpy(lin_w).to(device=self._device)
 
         root_state = th.cat([pos_w, quat_w, lin_w, ang_w], dim=0).unsqueeze(0)
         return root_state
-    
+
 
     @property
     def joint_pos(self):
@@ -186,7 +230,7 @@ class MujocoArticulation():
             self._joint_pos.data = th.from_numpy(self._data.sensordata[:self._num_motor].copy())\
                                     .to(dtype=th.float32, device=self._device).expand(1, -1)
             self._joint_pos.timestamp = self._sim_timestamp
-        return self._joint_pos.data[:,mujoco_to_isaac] 
+        return self._joint_pos.data[:,mujoco_to_isaac]
 
     @property
     def joint_vel(self):
@@ -207,16 +251,16 @@ class MujocoArticulation():
 
     @property
     def root_ang_vel_b(self) -> th.Tensor:
-        return math_utils.quat_rotate_inverse(self.root_quat_w, self.root_ang_vel_w)
+        return quat_apply_inverse(self.root_quat_w, self.root_ang_vel_w)
 
     @property
     def device(self):
         return self._device
-    
-    @property 
+
+    @property
     def num_motor(self):
         return self._num_motor
-    
+
     @joint_vel.setter
     def joint_vel(self, value: th.Tensor):
         assert value.shape[-1] == self._num_motor, \

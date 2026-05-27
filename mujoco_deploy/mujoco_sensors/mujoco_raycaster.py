@@ -1,12 +1,83 @@
-import mujoco 
-import torch as th 
-from isaaclab.utils.math import quat_apply, quat_apply_yaw
+import mujoco
+import torch as th
+# from isaaclab.utils.math import quat_apply, quat_apply_yaw
 from typing import Sequence
 from mujoco_deploy.mujoco_sensors.mujoco_base_sensor import MujocoBaseSensor
-import numpy as np 
+import numpy as np
 from mujoco.viewer import Handle
 from multiprocessing import Process
 from dataclasses import dataclass
+
+@th.jit.script
+def quat_apply(quat: th.Tensor, vec: th.Tensor) -> th.Tensor:
+    """Apply a quaternion rotation to a vector.
+
+    Args:
+        quat: The quaternion in (w, x, y, z). Shape is (..., 4).
+        vec: The vector in (x, y, z). Shape is (..., 3).
+
+    Returns:
+        The rotated vector in (x, y, z). Shape is (..., 3).
+    """
+    # store shape
+    shape = vec.shape
+    # reshape to (N, 3) for multiplication
+    quat = quat.reshape(-1, 4)
+    vec = vec.reshape(-1, 3)
+    # extract components from quaternions
+    xyz = quat[:, 1:]
+    t = xyz.cross(vec, dim=-1) * 2
+    return (vec + quat[:, 0:1] * t + xyz.cross(t, dim=-1)).view(shape)
+
+@th.jit.script
+def normalize(x: th.Tensor, eps: float = 1e-9) -> th.Tensor:
+    """Normalizes a given input tensor to unit length.
+
+    Args:
+        x: Input tensor of shape (N, dims).
+        eps: A small value to avoid division by zero. Defaults to 1e-9.
+
+    Returns:
+        Normalized tensor of shape (N, dims).
+    """
+    return x / x.norm(p=2, dim=-1).clamp(min=eps, max=None).unsqueeze(-1)
+
+@th.jit.script
+def yaw_quat(quat: th.Tensor) -> th.Tensor:
+    """Extract the yaw component of a quaternion.
+
+    Args:
+        quat: The orientation in (w, x, y, z). Shape is (..., 4)
+
+    Returns:
+        A quaternion with only yaw component.
+    """
+    shape = quat.shape
+    quat_yaw = quat.view(-1, 4)
+    qw = quat_yaw[:, 0]
+    qx = quat_yaw[:, 1]
+    qy = quat_yaw[:, 2]
+    qz = quat_yaw[:, 3]
+    yaw = th.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    quat_yaw = th.zeros_like(quat_yaw)
+    quat_yaw[:, 3] = th.sin(yaw / 2)
+    quat_yaw[:, 0] = th.cos(yaw / 2)
+    quat_yaw = normalize(quat_yaw)
+    return quat_yaw.view(shape)
+
+@th.jit.script
+def quat_apply_yaw(quat: th.Tensor, vec: th.Tensor) -> th.Tensor:
+    """Rotate a vector only around the yaw-direction.
+
+    Args:
+        quat: The orientation in (w, x, y, z). Shape is (N, 4).
+        vec: The vector in (x, y, z). Shape is (N, 3).
+
+    Returns:
+        The rotated vector in (x, y, z). Shape is (N, 3).
+    """
+    quat_yaw = yaw_quat(quat)
+    return quat_apply(quat_yaw, vec)
 
 @dataclass
 class RayCasterData:
@@ -84,15 +155,15 @@ def render_sphere(viewer: Handle, position: np.ndarray, diameter: float, color: 
 
 
 class MujocoRaycaster(MujocoBaseSensor):
-    def __init__(self, 
-                 env_cfg, 
+    def __init__(self,
+                 env_cfg,
                  articulation,
-                 model: mujoco.MjModel, 
-                 data:mujoco.MjData 
+                 model: mujoco.MjModel,
+                 data:mujoco.MjData
                  ):
         super().__init__(env_cfg)
         self._model = model
-        self._data = data 
+        self._data = data
         self._ray_cast_data = RayCasterData()
         self._env_cfg = env_cfg
         self.sensor_cfg = env_cfg.scene.height_scanner
@@ -130,9 +201,9 @@ class MujocoRaycaster(MujocoBaseSensor):
     def _update_buffers_impl(self, env_ids: Sequence[int]):
         root_state_w = self._articulation.root_state_w
         pos_w = root_state_w[:,:3].clone().to(dtype=th.float32)
-        quat_w = root_state_w[:,3:7].clone().to(dtype=th.float32) 
+        quat_w = root_state_w[:,3:7].clone().to(dtype=th.float32)
         # apply drift
-        
+
         pos_w = (pos_w + self.drift[env_ids]).to(dtype=th.float32)        # store the poses
         self._ray_cast_data.pos_w[env_ids] = pos_w
         self._ray_cast_data.quat_w[env_ids] = quat_w
@@ -148,7 +219,7 @@ class MujocoRaycaster(MujocoBaseSensor):
             ray_directions_w = quat_apply(quat_w.repeat(1, self.num_rays), self.ray_directions[env_ids])
 
         geomid = np.zeros(1, np.int32)
-        ray_starts_w_numpy = ray_starts_w.detach().cpu().numpy() 
+        ray_starts_w_numpy = ray_starts_w.detach().cpu().numpy()
         ray_directions_w_numpy = ray_directions_w.detach().cpu().numpy()
         base_body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
         geomgroup = np.array([1, 0, 0, 0, 0, 0], dtype=np.uint8)
