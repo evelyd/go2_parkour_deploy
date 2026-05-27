@@ -1,7 +1,7 @@
 import mujoco
-import mujoco.viewer 
-import numpy as np 
-import torch as th 
+import mujoco.viewer
+import numpy as np
+import torch as th
 from core.utils import isaac_to_mujoco, ISAAC_JOINT_NAMES
 import re, time
 from mujoco_deploy.mujoco_sensors.mujoco_articulation import MujocoArticulation
@@ -11,10 +11,10 @@ class MujocoEnv():
     Mujoco Environment
     """
     def __init__(
-        self, 
+        self,
         env_cfg,
         model_xml_path,
-        use_camera    
+        use_camera
         ):
         self.env_cfg = env_cfg
         self.model_xml_path = model_xml_path
@@ -34,19 +34,19 @@ class MujocoEnv():
 
         self._nominal_joint_pos = np.hstack(
                             [
-                            np.array(init_state.pos).squeeze(), 
-                            np.array(init_state.rot).squeeze(), 
+                            np.array(init_state.pos).squeeze(),
+                            np.array(init_state.rot).squeeze(),
                             np.array(default_joint_data).squeeze()
                             ]
                             )[None, 7:]
         self._default_joint_vel = np.hstack(
                             [
-                            np.array(init_state.pos).squeeze(), 
-                            np.array(init_state.rot).squeeze(), 
+                            np.array(init_state.pos).squeeze(),
+                            np.array(init_state.rot).squeeze(),
                             np.array(init_state.lin_vel).squeeze(),
                             np.array(init_state.ang_vel).squeeze()]
                             )[None]
-        self._default_joint_pose = th.zeros((1, 
+        self._default_joint_pose = th.zeros((1,
                                             self._articulation.num_motor),
                                             device = self._articulation.device)
     def _init_mujoco(self):
@@ -55,16 +55,16 @@ class MujocoEnv():
         bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
 
         self.viewer = mujoco.viewer.launch_passive(
-                                                   self._model, 
+                                                   self._model,
                                                    self._data
                                                    )
         self.viewer.cam.type = mujoco.mjtCamera.mjCAMERA_TRACKING
         self.viewer.cam.trackbodyid = bid
 
-        self.viewer.cam.distance = 3.0  
-        self.viewer.cam.elevation = -30 
-        self.viewer.cam.azimuth = 90    
-        self._model.opt.timestep = self.env_cfg.sim.dt 
+        self.viewer.cam.distance = 3.0
+        self.viewer.cam.elevation = -30
+        self.viewer.cam.azimuth = 90
+        self._model.opt.timestep = self.env_cfg.sim.dt
         self._model.opt.gravity = np.array([self.env_cfg.sim.gravity])
         self._articulation = MujocoArticulation(self.env_cfg, self._model, self._data)
 
@@ -85,7 +85,7 @@ class MujocoEnv():
             )
         for idx, joint_idx in enumerate(isaac_to_mujoco):
             self._data.ctrl[idx] = actions[0][joint_idx]
-            
+
         self.articulation.update(dt = self.env_cfg.sim.dt )
         time_until_next_step = self._model.opt.timestep - (
             time.perf_counter() - step_start
@@ -98,30 +98,30 @@ class MujocoEnv():
     @property
     def articulation(self):
         return self._articulation
-    
+
     @property
     def data(self):
         return self._data
-    
+
     @property
     def model(self):
         return self._model
-    
+
     @property
     def default_joint_vel(self):
         return th.from_numpy(self._default_joint_vel[:,1:]).to(self._articulation.device)
-    
 
-    @default_joint_vel.setter 
+
+    @default_joint_vel.setter
     def default_joint_vel(self, value: th.Tensor):
         self._default_joint_vel[:] = value
 
 
-    @property 
+    @property
     def default_joint_pose(self):
         return self._default_joint_pose
 
-    @default_joint_pose.setter 
+    @default_joint_pose.setter
     def default_joint_pose(self, value: th.Tensor):
         self._default_joint_pose[:] = value
 

@@ -1,8 +1,8 @@
-import mujoco 
-import torch as th 
+import mujoco
+import torch as th
 from typing import Sequence, Any
 from mujoco_deploy.mujoco_sensors.mujoco_base_sensor import MujocoBaseSensor
-import numpy as np 
+import numpy as np
 from dataclasses import dataclass
 import mujoco, cv2
 
@@ -14,15 +14,15 @@ class CameraData:
     info: list[dict[str, Any]] = None
 
 class MujocoDepthCamera(MujocoBaseSensor):
-    def __init__(self, 
-                 env_cfg, 
+    def __init__(self,
+                 env_cfg,
                  device,
-                 model:mujoco.MjModel, 
-                 data:mujoco.MjData 
+                 model:mujoco.MjModel,
+                 data:mujoco.MjData
                  ):
         super().__init__(env_cfg)
         self._camera_data = CameraData()
-        self._cam_name = 'd435i_camera' 
+        self._cam_name = 'd435i_camera'
         self._device = device
         self.sensor_cfg = env_cfg.scene.depth_camera
         self._data = data
@@ -46,7 +46,7 @@ class MujocoDepthCamera(MujocoBaseSensor):
         self._camera_data.intrinsic_matrices[:, 2, 2] = 1.0
         self._camera_data.image_shape = (self.sensor_cfg.pattern_cfg.height, self.sensor_cfg.pattern_cfg.width)
         self._camera_data.output = {}
-        self._camera_data.info = {name: None for name in self.sensor_cfg.data_types} 
+        self._camera_data.info = {name: None for name in self.sensor_cfg.data_types}
 
     def _update_buffers_impl(self, env_ids: Sequence[int]):
         for _key in self._camera_data.info.keys():
@@ -57,14 +57,14 @@ class MujocoDepthCamera(MujocoBaseSensor):
 
             else:
                 raise ValueError(f"CameraCfg data_types are only support [rgb, distance_to_image_plan] ,not a {self.sensor_cfg.data_types}")
-    
+
     def _create_rgb(self):
         self._renderer.update_scene(self._data, camera=self._cam_name)
         self._image = self._renderer.render()
         self._image = cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB)
         return th.from_numpy(self._image).to(self._device)
-    
-    
+
+
     def _create_depth(self):
         self._renderer.update_scene(self._data, camera=self._cam_name)
         self._renderer.enable_depth_rendering()
@@ -83,7 +83,7 @@ class MujocoDepthCamera(MujocoBaseSensor):
             self._depth_image[self._depth_image > self.sensor_cfg.max_distance] = 0.0
         self._renderer.disable_depth_rendering()
         return self._depth_image.to(self._device)
-    
+
     def _update_intrinsic_matrices(self):
         f_x = (self.sensor_cfg.pattern_cfg.width * self.sensor_cfg.pattern_cfg.focal_length) / self.sensor_cfg.pattern_cfg.horizontal_aperture
         f_y = (self.sensor_cfg.pattern_cfg.height * self.sensor_cfg.pattern_cfg.focal_length) / self.sensor_cfg.pattern_cfg.vertical_aperture
@@ -97,8 +97,8 @@ class MujocoDepthCamera(MujocoBaseSensor):
     def render(self, viewer):
         for key, item in self._camera_data.output.items():
             image = item.detach().cpu().numpy()
-            cv2.imshow(key, image)
-        cv2.waitKey(1)
+            # cv2.imshow(key, image)
+        # cv2.waitKey(1)
 
     @property
     def sensor_data(self) -> CameraData:

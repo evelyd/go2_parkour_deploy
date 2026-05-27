@@ -1,9 +1,19 @@
+import os
+import sys
+import argparse
+import importlib.util
 import numpy as np
 import trimesh
 import scipy.interpolate as interpolate
-import parkour_isaaclab, os
-from scripts.utils import load_local_cfg
-import core
+
+current_dir = os.path.dirname(os.path.abspath(__file__))
+repo_root = os.path.dirname(current_dir)
+utils_path = os.path.join(repo_root, "scripts", "utils.py")
+
+spec = importlib.util.spec_from_file_location("local_utils", utils_path)
+local_utils = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(local_utils)
+load_local_cfg = local_utils.load_local_cfg
 
 def random_uniform_terrain(difficulty, cfg, hf):
     if cfg.downsampled_scale is None:
@@ -34,8 +44,8 @@ def random_uniform_terrain(difficulty, cfg, hf):
     z_upsampled = func(x_upsampled, y_upsampled)
     # round off the interpolated heights to the nearest vertical step
     z_upsampled = np.rint(z_upsampled).astype(np.int16)
-    hf += z_upsampled 
-    return hf 
+    hf += z_upsampled
+    return hf
 
 
 def parkour_demo_terrain_from_yaml(cfg: str):
@@ -97,20 +107,20 @@ def parkour_demo_terrain_from_yaml(cfg: str):
 
     left_y = mid_y + round(np.random.uniform(0.15, 0.3) / cfg.horizontal_scale)
     right_y = mid_y - round(np.random.uniform(0.15, 0.3) / cfg.horizontal_scale)
-    
+
     slope_height = round(np.random.uniform(0.15, 0.22) / cfg.vertical_scale)
     slope_depth = round(np.random.uniform(0.75, 0.85) / cfg.horizontal_scale)
     slope_width = round(1.0 / cfg.horizontal_scale)
-    
+
     platform_height = slope_height + np.random.randint(0, 0.2 / cfg.vertical_scale)
 
     heights = np.tile(np.linspace(-slope_height, slope_height, slope_width), (slope_depth, 1)) * 1
     hf[platform_length:platform_length+slope_depth, left_y-slope_width//2: left_y+slope_width//2] = heights.astype(int) + platform_height
-    
+
     platform_length += slope_depth + gap_size
     heights = np.tile(np.linspace(-slope_height, slope_height, slope_width), (slope_depth, 1)) * -1
     hf[platform_length:platform_length+slope_depth, right_y-slope_width//2: right_y+slope_width//2] = heights.astype(int) + platform_height
-    
+
     platform_length += slope_depth + gap_size + round(0.4 / cfg.horizontal_scale)
 
     if apply_rough:
@@ -124,16 +134,16 @@ def export_hfield_png(hf, cfg, out_png="terrain.png"):
     H = hf.astype(np.float32) * vs
     Hmin = float(H.min())
     Hmax = float(H.max())
-    Zscale = max(Hmax - Hmin, 1e-6)   
+    Zscale = max(Hmax - Hmin, 1e-6)
     Hn = (H - Hmin) / Zscale + 1e-6
     from PIL import Image
     Image.fromarray((Hn.T * 65535).astype(np.uint16), mode="I;16").save(out_png)
 
     nx, ny = hf.shape
-    sx = max((nx * hs) / 2.0, 1e-6) 
+    sx = max((nx * hs) / 2.0, 1e-6)
     sy = max((ny * hs) / 2.0, 1e-6)
-    sz = Zscale                     
-    
+    sz = Zscale
+
     return nx, ny, sx, sy, sz
 
 def export_mesh_obj(hf, cfg, out_obj="terrain.obj", center_origin=True):
@@ -146,8 +156,18 @@ def export_mesh_obj(hf, cfg, out_obj="terrain.obj", center_origin=True):
         X = X - X.max() / 2.0
         Y = Y - Y.max() / 2.0
     XX, YY = np.meshgrid(X, Y, indexing="ij")
-    ZZ = hf.astype(np.float32) * vs
-    verts = np.column_stack([XX.ravel(), YY.ravel(), ZZ.ravel()])
+
+    # Top surface vertices
+    ZZ_top = hf.astype(np.float32) * vs
+    verts_top = np.column_stack([XX.ravel(), YY.ravel(), ZZ_top.ravel()])
+
+    # Bottom solid floor vertices at -0.1m
+    ZZ_bottom = np.full_like(ZZ_top, -0.1)
+    verts_bottom = np.column_stack([XX.ravel(), YY.ravel(), ZZ_bottom.ravel()])
+
+    verts = np.vstack([verts_top, verts_bottom])
+    num_top_verts = len(verts_top)
+
     faces = []
     for i in range(nx - 1):
         for j in range(ny - 1):
@@ -155,27 +175,63 @@ def export_mesh_obj(hf, cfg, out_obj="terrain.obj", center_origin=True):
             v01 = i * ny + (j + 1)
             v10 = (i + 1) * ny + j
             v11 = (i + 1) * ny + (j + 1)
-            faces.append([v00, v01, v11])
-            faces.append([v00, v11, v10])
+
+            # 1. TOP FACES (Normals point +Z)
+            faces.append([v00, v10, v11])
+            faces.append([v00, v11, v01])
+
+            # 2. BOTTOM FACES (Normals point -Z)
+            b00 = v00 + num_top_verts
+            b01 = v01 + num_top_verts
+            b10 = v10 + num_top_verts
+            b11 = v11 + num_top_verts
+            faces.append([b00, b01, b11])
+            faces.append([b00, b11, b10])
+
+            # 3. SIDE WALLS (Perfectly ordered outward normals)
+            if i == 0: # Left Wall (Normal -X)
+                faces.append([b00, v00, v01])
+                faces.append([b00, v01, b01])
+
+            if i == nx - 2: # Right Wall (Normal +X)
+                faces.append([b10, b11, v11])
+                faces.append([b10, v11, v10])
+
+            if j == 0: # Front Wall (Normal -Y)
+                faces.append([b00, b10, v10])
+                faces.append([b00, v10, v00])
+
+            if j == ny - 2: # Back Wall (Normal +Y)
+                faces.append([b01, v01, v11])
+                faces.append([b01, v11, b11])
+
     mesh = trimesh.Trimesh(vertices=verts, faces=np.asarray(faces), process=False)
     mesh.export(out_obj)
     return out_obj
 
 def main(args):
 
-  logs_path = '/'
-  for path in parkour_isaaclab.__path__[0].split('/')[1:-1]:
-      logs_path = os.path.join(logs_path, path)
-  logs_path = os.path.join(logs_path,'logs',args.rl_lib,args.task, args.expid)
+  parkour_repo = "/home/edelia-iit.local/git/IsaacLab/Isaaclab_Parkour"
+
+  logs_path = os.path.join(parkour_repo, 'logs', args.rl_lib, args.task, args.expid)
   cfgs_path = os.path.join(logs_path, 'params')
   env_cfg = load_local_cfg(cfgs_path, 'env')
-  
+
   parkour_demo_cfg = env_cfg.scene.terrain.terrain_generator.sub_terrains.parkour_demo
   parkour_demo_cfg.horizontal_scale = 0.1
   parkour_demo_cfg.size = (16.,4.0)
   parkour_demo_cfg.noise_range = (0.02, 0.02)
   hf, cfg = parkour_demo_terrain_from_yaml(parkour_demo_cfg)
-  _, _, _, _, _ = export_hfield_png(hf, cfg, os.path.join(os.path.join(core.__path__[0],'go2', 'terrain.png')))
+
+  out_dir = os.path.join(repo_root, 'core', 'go2')
+  os.makedirs(out_dir, exist_ok=True)
+  out_file = os.path.join(out_dir, 'terrain.png')
+  out_file_mesh = os.path.join(out_dir, 'terrain.obj')
+  export_mesh_obj(hf, cfg, out_file_mesh)
+  print(f"Successfully saved terrain to: {out_file_mesh}")
+
+  export_hfield_png(hf, cfg, out_file)
+  print(f"Successfully saved terrain to: {out_file}")
 
 if __name__ == "__main__":
     import argparse

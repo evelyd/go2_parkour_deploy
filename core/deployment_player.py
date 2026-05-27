@@ -8,15 +8,15 @@ class DeploymentPlayer:
     def __init__(
         self,
         env_cfg,
-        agent_cfg, 
+        agent_cfg,
         network_interface,
         logs_path,
     ):
-        try: 
+        try:
             env_cfg.scene.depth_camera
-            use_camera = True 
-        except: 
-            use_camera = False 
+            use_camera = True
+        except:
+            use_camera = False
 
         if network_interface.lower() =='lo':
             self.env = MujocoWrapper(env_cfg, agent_cfg, os.path.join(core.__path__[0],'go2/scene_parkour.xml'), use_camera)
@@ -38,12 +38,12 @@ class DeploymentPlayer:
         self.num_prop = estimator_paras["num_prop"]
         self.num_scan = estimator_paras["num_scan"]
         self.num_priv_explicit = estimator_paras["num_priv_explicit"]
-        self.history_len = 10 
-        self.cnt = 0 
+        self.history_len = 10
+        self.cnt = 0
         self._call_cnt = 0
         self._maximum_iteration = float('inf')
         print(self.policy)
-        
+
     def play(self):
         """Advances the environment one time step after generating observations"""
         obs, extras = self.env.get_observations()
@@ -51,7 +51,7 @@ class DeploymentPlayer:
             if not self._use_camera:
                 actions = self.policy(obs , hist_encoding=True)
             else:
-                if self.env.common_step_counter %5 == 0:
+                if self.env.common_step_counter % 5 == 0:
                     depth_image = extras["observations"]['depth_camera']
                     proprioception = obs[:, :self.num_prop].clone()
                     proprioception[:, 6:8] = 0
@@ -65,14 +65,14 @@ class DeploymentPlayer:
         obs, terminated, timeout, extras = self.env.step(actions)  # For HW, this internally just does forward
 
         self.cnt += 1
-        return obs, terminated, timeout, extras
-    
+        return obs, terminated, timeout, extras, actions
+
     def reset(self, maximum_iteration: int |None = None, extras: Dict[str, str] | None = None):
-        self._call_cnt +=1 
+        self._call_cnt +=1
         if type(maximum_iteration) == int:
             self.maximum_iteration = maximum_iteration
         if self.alive():
-            self.env.reset() 
+            self.env.reset()
             print('[Current eval iter]: ', self._call_cnt, '[Left]: ', self.maximum_iteration-self._call_cnt)
 
     def alive(self):
@@ -80,5 +80,5 @@ class DeploymentPlayer:
             return True
         else:
             self.env.close()
-            return False 
-        
+            return False
+
