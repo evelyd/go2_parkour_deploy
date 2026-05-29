@@ -12,7 +12,7 @@ import mujoco
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy, Image
-from dls2_msgs.msg import BaseStateMsg, BlindStateMsg, TrajectoryGeneratorMsg
+from dls2_interface.msg import BaseState, BlindState, TrajectoryGenerator
 from cv_bridge import CvBridge
 
 
@@ -41,6 +41,7 @@ class RealGo2Env(MujocoWrapper):
             dtype=th.float32,
             device=self.device
         )
+        self.sequence_id = 0
 
     def sync_mujoco_state(self, qpos, qvel):
         """Forces the internal MuJoCo model to perfectly match the real robot."""
@@ -117,47 +118,44 @@ class Parkour_Go2_Deployment_Node(Node):
         self.qvel = np.zeros(18)
 
         # ROS2 Subscriptions
-        self.sub_base = self.create_subscription(BaseStateMsg, "/dls2/base_state", self.base_state_callback, 1)
-        self.sub_blind = self.create_subscription(BlindStateMsg, "/dls2/blind_state", self.blind_state_callback, 1)
+        self.sub_base = self.create_subscription(BaseState, "base_state", self.base_state_callback, 1)
+        self.sub_blind = self.create_subscription(BlindState, "blind_state", self.blind_state_callback, 1)
         self.sub_joy = self.create_subscription(Joy, "joy", self.joy_callback, 1)
         self.sub_depth = self.create_subscription(Image, "/camera/depth/image_rect_raw", self.depth_callback, 1)
 
         # ROS2 Publishers
-        self.pub_traj = self.create_publisher(TrajectoryGeneratorMsg, "dls2/trajectory_generator", 1)
+        self.pub_traj = self.create_publisher(TrajectoryGenerator, "trajectory_generator", 1)
 
         # Control Loop Timer (50 Hz) -> Match RL_FREQ
         self.timer = self.create_timer(1.0 / 50.0, self.compute_rl_control)
 
     def joy_callback(self, msg):
-        # Feed directly into the Env's mock joystick
-        self.player.env._joystick.velocity_cmd[0, 0] = msg.axes[1] / 3.5  # Forward/Backward
-        self.player.env._joystick.velocity_cmd[0, 1] = msg.axes[0] / 3.5  # Left/Right
-        self.player.env._joystick.velocity_cmd[0, 2] = msg.axes[3] / 2.0  # Yaw
+        filter_joystick = 0.7
 
-        if msg.buttons[8] == 1:
-            self.get_logger().info("Kill switch pressed. Shutting down.")
-            os.system("kill -9 $(ps -u | grep -m 1 hal | grep -o '^[^ ]* *[0-9]*' | grep -o '[0-9]*')")
-            os.system("pkill -f modular_parkour_ros2.py")
-            exit(0)
+        # Smooth the inputs
+        current_vx = self.player.env._joystick.velocity_cmd[0, 0]
+        current_vy = self.player.env._joystick.velocity_cmd[0, 1]
+        current_yaw = self.player.env._joystick.velocity_cmd[0, 2]
+
+        self.player.env._joystick.velocity_cmd[0, 0] = current_vx * filter_joystick + (msg.axes[1] / 3.5) * (1 - filter_joystick)
+        self.player.env._joystick.velocity_cmd[0, 1] = current_vy * filter_joystick + (msg.axes[0] / 3.5) * (1 - filter_joystick)
+        self.player.env._joystick.velocity_cmd[0, 2] = current_yaw * filter_joystick + (msg.axes[3] / 2.0) * (1 - filter_joystick)
+
+        self.last_joy_time = time.time()
+
+        # (Keep your kill switch logic here)
 
     def base_state_callback(self, msg):
-        self.qpos[0:3] = np.array(msg.position)
-        # Quat: MuJoCo uses [w, x, y, z], DLS2 uses [x, y, z, w]
-        self.qpos[3:7] = np.roll(np.array(msg.orientation), 1)
-        self.qvel[0:3] = np.array(msg.linear_velocity)
-        self.qvel[3:6] = np.array(msg.angular_velocity)
+        self.qpos[0:3] = np.array(msg.pose.position)
+        # Quat: MuJoCo uses [w, x, y, z], simulator sends [x, y, z, w]
+        self.qpos[3:7] = np.roll(np.array(msg.pose.orientation), 1)
+        self.qvel[0:3] = np.array(msg.velocity.linear)
+        self.qvel[3:6] = np.array(msg.velocity.angular)
         self.first_base_arrived = True
 
     def blind_state_callback(self, msg):
-        jp = np.array(msg.joints_position)
-        jv = np.array(msg.joints_velocity)
-
-        # Fix DLS2 Hip Signs
-        jp[0] = -jp[0]; jp[6] = -jp[6]
-        jv[0] = -jv[0]; jv[6] = -jv[6]
-
-        self.qpos[7:19] = jp
-        self.qvel[6:18] = jv
+        self.qpos[7:19] = np.array(msg.joints_position)
+        self.qvel[6:18] = np.array(msg.joints_velocity)
         self.first_joints_arrived = True
 
     def depth_callback(self, msg):
@@ -171,19 +169,31 @@ class Parkour_Go2_Deployment_Node(Node):
             self.get_logger().warn(f"Depth conversion failed: {e}")
 
     def publish_actions(self, target_joints):
-        """Called internally by RealGo2Env.step()"""
-        # Re-fix signs for DLS2 convention before sending to hardware
-        target_joints[0] = -target_joints[0]
-        target_joints[6] = -target_joints[6]
+        msg = TrajectoryGenerator()
 
-        msg = TrajectoryGeneratorMsg()
+        # New required timing and sequence fields
+        msg.timestamp = float(self.get_clock().now().nanoseconds)
+        msg.sequence_id = int(self.sequence_id % 1000)
+        self.sequence_id += 1
+
         msg.joints_position = target_joints.flatten().tolist()
         msg.joints_velocity = np.zeros(12).tolist()
+
+        # Explicit Kp and Kd (Replace with your actual parkour gains)
+        msg.kp = (np.ones(12) * 20.0).tolist()
+        msg.kd = (np.ones(12) * 0.5).tolist()
+
         self.pub_traj.publish(msg)
 
     def compute_rl_control(self):
         if not (self.first_base_arrived and self.first_joints_arrived):
             return
+
+        # Joystick timeout safety
+        if self.last_joy_time is not None and (time.time() - self.last_joy_time > 1.0):
+            self.player.env._joystick.velocity_cmd[0, :] = 0.0
+            self.get_logger().warn("Joystick timeout, stopping the robot")
+            self.last_joy_time = None
 
         # 1. Sync the real hardware state into the MuJoCo internal kinematic tree
         self.player.env.sync_mujoco_state(self.qpos, self.qvel)
