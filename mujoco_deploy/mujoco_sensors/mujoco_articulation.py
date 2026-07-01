@@ -73,10 +73,101 @@ class MujocoArticulation():
         self._init_joint_info()
 
     def _init_joint_info(self):
-        self._joint_stiffness = th.ones(self._num_motor).to(self._device)
-        self._joint_dampings = th.ones(self._num_motor).to(self._device)
-        self._joint_stiffness *= self._env_cfg.scene.robot.actuators.base_legs.stiffness
-        self._joint_dampings *= self._env_cfg.scene.robot.actuators.base_legs.damping
+        self._joint_stiffness = th.zeros(self._num_motor).to(self._device)
+        self._joint_dampings = th.zeros(self._num_motor).to(self._device)
+
+        self._saturation_effort = th.zeros((1, self._num_motor), device=self.device)
+        self._velocity_limit = th.zeros((1, self._num_motor), device=self.device)
+        self._effort_limit = th.zeros((1, self._num_motor), device=self.device)
+        
+        # New arrays for PaceDCMotor
+        self._encoder_bias = th.zeros(self._num_motor).to(self._device)
+        self.torque_delay = 0
+
+        # Loop through all actuator groups dynamically (e.g., 'hip', 'thigh', 'calf')
+        for actuator_group_name, actuator_cfg in self._env_cfg.scene.robot.actuators.items():
+            
+            # Find which joints belong to this specific actuator group
+            group_joints = []
+            exprs = actuator_cfg.joint_names_expr if isinstance(actuator_cfg.joint_names_expr, list) else [actuator_cfg.joint_names_expr]
+            for expr in exprs:
+                compiled_expr = re.compile(expr)
+                for idx, real_joint_name in enumerate(ISAAC_JOINT_NAMES):
+                    if compiled_expr.match(real_joint_name):
+                        group_joints.append((idx, real_joint_name))
+
+            # 1. Parse Stiffness
+            if hasattr(actuator_cfg.stiffness, 'items'):
+                for pattern, value in actuator_cfg.stiffness.items():
+                    compiled_pattern = re.compile(pattern)
+                    for idx, real_joint_name in group_joints:
+                        if compiled_pattern.match(real_joint_name):
+                            self._joint_stiffness[idx] = value
+            else:
+                for idx, _ in group_joints:
+                    self._joint_stiffness[idx] = actuator_cfg.stiffness
+
+            # 2. Parse Damping
+            if hasattr(actuator_cfg.damping, 'items'):
+                for pattern, value in actuator_cfg.damping.items():
+                    compiled_pattern = re.compile(pattern)
+                    for idx, real_joint_name in group_joints:
+                        if compiled_pattern.match(real_joint_name):
+                            self._joint_dampings[idx] = value
+            else:
+                for idx, _ in group_joints:
+                    self._joint_dampings[idx] = actuator_cfg.damping
+
+            # 3. Parse Saturation Effort
+            if hasattr(actuator_cfg.saturation_effort, 'items'):
+                for pattern, value in actuator_cfg.saturation_effort.items():
+                    compiled_pattern = re.compile(pattern)
+                    for idx, real_joint_name in group_joints:
+                        if compiled_pattern.match(real_joint_name):
+                            self._saturation_effort[0, idx] = value
+            else:
+                for idx, _ in group_joints:
+                    self._saturation_effort[0, idx] = actuator_cfg.saturation_effort
+
+            # 4. Parse Velocity Limit
+            if hasattr(actuator_cfg.velocity_limit, 'items'):
+                for pattern, value in actuator_cfg.velocity_limit.items():
+                    compiled_pattern = re.compile(pattern)
+                    for idx, real_joint_name in group_joints:
+                        if compiled_pattern.match(real_joint_name):
+                            self._velocity_limit[0, idx] = value
+            else:
+                for idx, _ in group_joints:
+                    self._velocity_limit[0, idx] = actuator_cfg.velocity_limit
+
+            # 5. Parse Effort Limit
+            if hasattr(actuator_cfg.effort_limit, 'items'):
+                for pattern, value in actuator_cfg.effort_limit.items():
+                    compiled_pattern = re.compile(pattern)
+                    for idx, real_joint_name in group_joints:
+                        if compiled_pattern.match(real_joint_name):
+                            self._effort_limit[0, idx] = value
+            else:
+                for idx, _ in group_joints:
+                    self._effort_limit[0, idx] = actuator_cfg.effort_limit
+                    
+            # 6. Parse Encoder Bias (For PaceDCMotor)
+            if hasattr(actuator_cfg, 'encoder_bias') and actuator_cfg.encoder_bias is not None:
+                if hasattr(actuator_cfg.encoder_bias, 'items'):
+                    for pattern, value in actuator_cfg.encoder_bias.items():
+                        compiled_pattern = re.compile(pattern)
+                        for idx, real_joint_name in group_joints:
+                            if compiled_pattern.match(real_joint_name):
+                                self._encoder_bias[idx] = value
+                else:
+                    for idx, _ in group_joints:
+                        self._encoder_bias[idx] = actuator_cfg.encoder_bias
+
+            # 7. Parse Torque Delay (For PaceDCMotor)
+            if hasattr(actuator_cfg, 'max_delay') and actuator_cfg.max_delay is not None:
+                self.torque_delay = max(self.torque_delay, int(actuator_cfg.max_delay))
+
+        # 8. Mass and COM
         self._body_com = np.zeros(3)
         self._total_mass = 0.0
         base_link_id = self.get_body_ids(['base_link'])['base_link']
@@ -89,20 +180,6 @@ class MujocoArticulation():
         self._joint_efforts = th.zeros((1, self._num_motor), dtype=th.float, device=self.device)
         self._control_joint_velocities = th.zeros((1, self._num_motor), dtype=th.float, device=self.device)
         self._zeros_effort = th.zeros((1, self._num_motor), device=self.device)
-
-        saturation_limit_compiled = {re.compile(joint_name): value  for joint_name, value in self._env_cfg.scene.robot.actuators.base_legs.saturation_effort.items()}
-        velocity_limit_compiled = {re.compile(joint_name): value  for joint_name, value in self._env_cfg.scene.robot.actuators.base_legs.velocity_limit.items()}
-        effort_limit_compiled = {re.compile(joint_name): value  for joint_name, value in self._env_cfg.scene.robot.actuators.base_legs.effort_limit.items()}
-        self._saturation_effort = th.zeros((1, self._num_motor), device=self.device)
-        self._velocity_limit = th.zeros((1, self._num_motor), device=self.device)
-        self._effort_limit = th.zeros((1, self._num_motor), device=self.device)
-
-        for joint_name_compiled in saturation_limit_compiled.keys():
-            for indx,real_joint_name in enumerate(ISAAC_JOINT_NAMES):
-                if joint_name_compiled.match(real_joint_name):
-                    self._saturation_effort[0,indx] = saturation_limit_compiled[joint_name_compiled]
-                    self._velocity_limit[0,indx] = velocity_limit_compiled[joint_name_compiled]
-                    self._effort_limit[0,indx] = effort_limit_compiled[joint_name_compiled]
 
     @property
     def saturation_effort(self):

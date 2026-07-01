@@ -111,9 +111,11 @@ class MujocoWrapper():
         self.common_step_counter = 0
         self.decimation = env_cfg.decimation
         self._history_length = env_cfg.observations.policy.extreme_parkour_observations.params.history_length
-        self._clip = th.tensor([[*env_cfg.actions.joint_pos.clip['.*']]], device=self.device).repeat(
-            1, self._mujoco_env.articulation.num_motor, 1
-            )
+        if hasattr(env_cfg.actions.joint_pos, 'clip') and env_cfg.actions.joint_pos.clip is not None:
+            self._clip = th.tensor([[*env_cfg.actions.joint_pos.clip['.*']]], device=self.device).repeat(
+                1, self._mujoco_env.articulation.num_motor, 1)
+        else:
+            self._clip = None
         self._observation_clip = env_cfg.observations.policy.extreme_parkour_observations.clip[-1]
         self._agent_cfg = agent_cfg
         self._stand_down_joint_pos = th.tensor(stand_down_joint_pos,dtype=float).to('cuda:0')[mujoco_to_isaac]
@@ -189,11 +191,17 @@ class MujocoWrapper():
 
     def _init_action_buffers(self):
         joint_pos_cfg = self._mujoco_env.env_cfg.actions.joint_pos
-        self._action_history_length = joint_pos_cfg.history_length
-        self._delay_update_global_steps = int(joint_pos_cfg.delay_update_global_steps)
-        self._use_delay = joint_pos_cfg.use_delay
-        self._action_delay_steps = joint_pos_cfg.action_delay_steps
-        self._action_history_buf = th.zeros(1, self._action_history_length, self._mujoco_env.articulation.num_motor, device=self.device, dtype=th.float)
+        self._action_history_length = getattr(joint_pos_cfg, 'history_length', 8)
+        self._delay_update_global_steps = int(getattr(joint_pos_cfg, 'delay_update_global_steps', 1))
+        self._use_delay = getattr(joint_pos_cfg, 'use_delay', False)
+        self._action_delay_steps = getattr(joint_pos_cfg, 'action_delay_steps', [])
+        
+        # Initialize to default pose because policy outputs absolute positions
+        default_pose = self._mujoco_env.default_joint_pose.to(self.device)
+        self._actions = default_pose.clone()
+        self._processed_actions = default_pose.clone()
+        self._action_history_buf = default_pose.unsqueeze(1).repeat(1, self._action_history_length, 1)
+        
         self._actions = th.zeros(1, self._mujoco_env.articulation.num_motor, device=self.device)
         self._processed_actions = th.zeros(1, self._mujoco_env.articulation.num_motor, device=self.device)
         self._obs_history_buffer = th.zeros(1, self._history_length, self._agent_cfg.estimator.num_prop, device=self.device)
