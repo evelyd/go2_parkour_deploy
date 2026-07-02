@@ -346,3 +346,7 @@ class MujocoArticulation():
         self._data.sensordata[:self._num_motor] = value_np
         self._joint_vel.data = value.clone().detach()
         self._joint_vel.timestamp = self._sim_timestamp
+
+    @property
+    def encoder_bias(self):
+        return self._encoder_bias

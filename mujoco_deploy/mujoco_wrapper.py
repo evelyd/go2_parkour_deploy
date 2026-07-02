@@ -222,7 +222,8 @@ class MujocoWrapper():
                 pbar.update(min(self._mujoco_env.env_cfg.sim.dt, 3.0 - pbar.n))
                 phase = th.tanh(th.tensor([runing_time / 1.2]).to('cuda:0'))
                 cur_pose = phase * self._mujoco_env.default_joint_pose + (1-phase) * self._stand_down_joint_pos
-                self._init_actions = self._mujoco_env.articulation.joint_stiffness*(cur_pose - self._mujoco_env.articulation.joint_pos) + \
+                encoder_bias = getattr(self._mujoco_env.articulation, 'encoder_bias', 0.0)
+                self._init_actions = self._mujoco_env.articulation.joint_stiffness*(cur_pose - self._mujoco_env.articulation.joint_pos + encoder_bias) + \
                     self._mujoco_env.articulation.joint_dampings * (self._mujoco_env.articulation.control_joint_velocities - self._mujoco_env.articulation.joint_vel)
                 processed_action_np = self._init_actions.detach().cpu().numpy()
                 self._mujoco_env.step(processed_action_np)
@@ -238,7 +239,8 @@ class MujocoWrapper():
                 pbar.update(min(0.1, 3.0 - pbar.n))
                 phase = th.tanh(th.tensor([runing_time / 1.2]).to('cuda:0'))
                 cur_pose = phase * self._stand_down_joint_pos + (1-phase) * init_pose
-                self._init_actions = self._mujoco_env.articulation.joint_stiffness*(cur_pose - self._mujoco_env.articulation.joint_pos) + \
+                encoder_bias = getattr(self._mujoco_env.articulation, 'encoder_bias', 0.0)
+                self._init_actions = self._mujoco_env.articulation.joint_stiffness*(cur_pose - self._mujoco_env.articulation.joint_pos + encoder_bias) + \
                     self._mujoco_env.articulation.joint_dampings * (self._mujoco_env.articulation.control_joint_velocities - self._mujoco_env.articulation.joint_vel)
                 processed_action_np = self._init_actions.detach().cpu().numpy()
                 self._mujoco_env.step(processed_action_np)
